@@ -1,0 +1,16 @@
+.venv/
+*.egg-info/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+python-commerce.db
+python-commerce.db-shm
+python-commerce.db-wal
+python-commerce.snapshot.sqlite
+*.snapshot.sqlite
+.pytest_cache/
+.coverage
+htmlcov/
+benchmarks/results/*.json

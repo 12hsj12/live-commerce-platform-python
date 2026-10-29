@@ -1,0 +1,64 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-local-root-password-change-me}
+      MYSQL_DATABASE: ecommerce
+      MYSQL_USER: ecommerce
+      MYSQL_PASSWORD: ${ECOMMERCE_MYSQL_PASSWORD:-local-app-password-change-me}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./deploy/mysql/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment: &app-environment
+      ECOMMERCE_PROCESS_ROLE: gateway
+      ECOMMERCE_MYSQL_HOST: mysql
+      ECOMMERCE_MYSQL_PORT: 3306
+      ECOMMERCE_MYSQL_USER: ecommerce
+      ECOMMERCE_MYSQL_PASSWORD: ${ECOMMERCE_MYSQL_PASSWORD:-local-app-password-change-me}
+      ECOMMERCE_MYSQL_DATABASE: ecommerce
+      ECOMMERCE_REDIS_URL: redis://redis:6379/0
+      ECOMMERCE_INVENTORY_MODE: redis
+      ECOMMERCE_FLASH_SALE_QUEUE: redis
+      ECOMMERCE_HOST: 0.0.0.0
+      ECOMMERCE_PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-environment
+      ECOMMERCE_PROCESS_ROLE: worker
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
