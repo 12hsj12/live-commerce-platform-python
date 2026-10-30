@@ -305,6 +305,26 @@ class OrderService:
             return OrderView(order.id, order.user_id, order.campaign_id, order.idempotency_key, order.state,
                              item.sku_id, item.quantity, item.unit_price_cents)
 
+    async def get_for_user(self, order_id: str, user_id: str) -> OrderView | None:
+        """Read an order only through a query already scoped to its owner."""
+        async with self.database.sessions() as session:
+            row = (await session.execute(select(Order, OrderItem).join(OrderItem, OrderItem.order_id == Order.id)
+                .where(Order.id == order_id, Order.user_id == user_id))).first()
+            if row is None:
+                return None
+            order, item = row
+            return OrderView(order.id, order.user_id, order.campaign_id, order.idempotency_key, order.state,
+                             item.sku_id, item.quantity, item.unit_price_cents)
+
+    async def list_for_user(self, user_id: str, limit: int = 5) -> list[OrderView]:
+        if not 1 <= limit <= 10:
+            raise ValueError("order list limit must be between 1 and 10")
+        async with self.database.sessions() as session:
+            rows = (await session.execute(select(Order, OrderItem).join(OrderItem, OrderItem.order_id == Order.id)
+                .where(Order.user_id == user_id).order_by(Order.created_at.desc()).limit(limit))).all()
+            return [OrderView(order.id, order.user_id, order.campaign_id, order.idempotency_key, order.state,
+                              item.sku_id, item.quantity, item.unit_price_cents) for order, item in rows]
+
     async def persist_queued_order(self, message: FlashSaleMessage) -> OrderView:
         async with self.database.sessions.begin() as session:
             row = (await session.execute(select(Order, OrderItem).join(OrderItem, OrderItem.order_id == Order.id)

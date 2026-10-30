@@ -1,0 +1,32 @@
+services:
+  api:
+    ports:
+      - "${ECOMMERCE_GATEWAY_1_PUBLISHED_PORT:-18080}:8080"
+
+  api-2:
+    build: .
+    environment:
+      ECOMMERCE_PROCESS_ROLE: gateway
+      ECOMMERCE_MYSQL_HOST: mysql
+      ECOMMERCE_MYSQL_PORT: 3306
+      ECOMMERCE_MYSQL_USER: ecommerce
+      ECOMMERCE_MYSQL_PASSWORD: ${ECOMMERCE_MYSQL_PASSWORD:-local-app-password-change-me}
+      ECOMMERCE_MYSQL_DATABASE: ecommerce
+      ECOMMERCE_MYSQL_POOL_SIZE: 4
+      ECOMMERCE_REDIS_URL: redis://redis:6379/0
+      ECOMMERCE_INVENTORY_MODE: redis
+      ECOMMERCE_FLASH_SALE_QUEUE: redis
+      ECOMMERCE_HOST: 0.0.0.0
+      ECOMMERCE_PORT: 8080
+    ports:
+      - "${ECOMMERCE_GATEWAY_2_PUBLISHED_PORT:-18081}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 30

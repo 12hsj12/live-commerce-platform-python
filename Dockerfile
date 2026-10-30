@@ -5,6 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY requirements.txt pyproject.toml README.md ./
 COPY app ./app
+COPY tools ./tools
 COPY run.py ./run.py
 RUN python -m pip install --no-cache-dir .
 

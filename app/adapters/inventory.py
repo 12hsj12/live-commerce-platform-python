@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 
 from ..models import Inventory, InventoryOperation
 
@@ -96,23 +97,56 @@ class InventoryGateway:
             stock_key, operation_key = self._keys(sku_id)
             result = int(await self.redis.eval(self._reserve, 2, stock_key, operation_key, quantity, operation_id))
             return {1: "success", 2: "duplicate", 0: "insufficient", -2: "conflict"}.get(result, "missing")
-        async with self.database.sessions.begin() as session:
-            operation = await session.get(InventoryOperation, operation_id)
-            if operation is not None:
-                if operation.sku_id != sku_id or operation.quantity != quantity:
-                    return "conflict"
-                return "duplicate"
-            stock = await session.get(Inventory, sku_id, with_for_update=True)
-            if stock is None:
-                return "missing"
-            if stock.available < quantity:
-                return "insufficient"
-            stock.available -= quantity
-            stock.reserved += quantity
-            stock.version += 1
-            session.add(InventoryOperation(operation_id=operation_id, sku_id=sku_id,
-                                             quantity=quantity, state="reserved"))
-            return "success"
+        lock = self.database.sqlite_memory_lock
+        if lock is not None:
+            async with lock:
+                return await self._reserve_sql(sku_id, quantity, operation_id)
+        return await self._reserve_sql(sku_id, quantity, operation_id)
+
+    async def _reserve_sql(self, sku_id: str, quantity: int, operation_id: str) -> str:
+        try:
+            async with self.database.sessions.begin() as session:
+                operation = await session.get(InventoryOperation, operation_id)
+                if operation is not None:
+                    if operation.sku_id != sku_id or operation.quantity != quantity:
+                        return "conflict"
+                    return "duplicate"
+                # A conditional UPDATE is atomic on both SQLite and MySQL. SELECT
+                # FOR UPDATE is ignored by SQLite, which allowed concurrent local
+                # requests to all observe and reserve the same available units.
+                result = await session.execute(
+                    update(Inventory)
+                    .where(Inventory.sku_id == sku_id, Inventory.available >= quantity)
+                    .values(available=Inventory.available - quantity,
+                            reserved=Inventory.reserved + quantity,
+                            version=Inventory.version + 1)
+                    .execution_options(synchronize_session=False)
+                )
+                if result.rowcount == 0:
+                    # A concurrent request with the same id may have committed
+                    # its journal before this conditional inventory update ran.
+                    operation = await session.get(InventoryOperation, operation_id)
+                    if operation is not None:
+                        if operation.sku_id != sku_id or operation.quantity != quantity:
+                            return "conflict"
+                        return "duplicate"
+                    stock = await session.get(Inventory, sku_id)
+                    return "missing" if stock is None else "insufficient"
+                session.add(InventoryOperation(operation_id=operation_id, sku_id=sku_id,
+                                                 quantity=quantity, state="reserved"))
+                await session.flush()
+                return "success"
+        except IntegrityError:
+            # Two identical request IDs may race past the initial read. The
+            # unique journal key rolls back the losing stock update as part of
+            # the same transaction; report the established idempotent outcome.
+            async with self.database.sessions() as session:
+                operation = await session.get(InventoryOperation, operation_id)
+            if operation is None:
+                raise
+            if operation.sku_id != sku_id or operation.quantity != quantity:
+                return "conflict"
+            return "duplicate"
 
     async def _transition(self, sku_id: str, operation_id: str, *, action: str) -> bool:
         if self.redis is not None:
@@ -126,30 +160,52 @@ class InventoryGateway:
             if action == "release" and result == -2:
                 raise RuntimeError("confirmed reservation cannot be released")
             raise LookupError("reservation not found")
+        lock = self.database.sqlite_memory_lock
+        if lock is not None:
+            async with lock:
+                return await self._transition_sql(sku_id, operation_id, action=action)
+        return await self._transition_sql(sku_id, operation_id, action=action)
+
+    async def _transition_sql(self, sku_id: str, operation_id: str, *, action: str) -> bool:
         async with self.database.sessions.begin() as session:
-            operation = await session.get(InventoryOperation, operation_id, with_for_update=True)
-            if operation is None:
-                raise LookupError("reservation not found")
-            stock = await session.get(Inventory, operation.sku_id, with_for_update=True)
-            if stock is None:
-                raise LookupError("sku not found")
             if action == "confirm":
-                if operation.state == "confirmed":
-                    return True
-                if operation.state != "reserved":
-                    raise RuntimeError("released reservation cannot be confirmed")
-                stock.reserved -= operation.quantity
-                stock.sold += operation.quantity
-                operation.state = "confirmed"
+                expected, target = "reserved", "confirmed"
             else:
+                expected, target = "reserved", "released"
+            changed = await session.execute(
+                update(InventoryOperation)
+                .where(InventoryOperation.operation_id == operation_id,
+                       InventoryOperation.state == expected)
+                .values(state=target)
+                .execution_options(synchronize_session=False)
+            )
+            if changed.rowcount == 0:
+                operation = await session.get(InventoryOperation, operation_id)
+                if operation is None:
+                    raise LookupError("reservation not found")
+                if action == "confirm":
+                    if operation.state == "confirmed":
+                        return True
+                    raise RuntimeError("released reservation cannot be confirmed")
                 if operation.state == "released":
                     return True
-                if operation.state != "reserved":
-                    raise RuntimeError("confirmed reservation cannot be released")
-                stock.reserved -= operation.quantity
-                stock.available += operation.quantity
-                operation.state = "released"
-            stock.version += 1
+                raise RuntimeError("confirmed reservation cannot be released")
+            operation = await session.get(InventoryOperation, operation_id)
+            if operation is None:
+                raise LookupError("reservation not found")
+            if action == "confirm":
+                values = {"reserved": Inventory.reserved - operation.quantity,
+                          "sold": Inventory.sold + operation.quantity}
+            else:
+                values = {"reserved": Inventory.reserved - operation.quantity,
+                          "available": Inventory.available + operation.quantity}
+            values["version"] = Inventory.version + 1
+            stock_changed = await session.execute(
+                update(Inventory).where(Inventory.sku_id == operation.sku_id).values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            if stock_changed.rowcount == 0:
+                raise LookupError("sku not found")
             return True
 
     async def confirm(self, sku_id: str, operation_id: str) -> bool:
@@ -166,24 +222,47 @@ class InventoryGateway:
             if result != 1:
                 raise RuntimeError("inventory rollback did not apply")
             return
+        lock = self.database.sqlite_memory_lock
+        if lock is not None:
+            async with lock:
+                await self._rollback_sql(sku_id, operation_id, action=action)
+            return
+        await self._rollback_sql(sku_id, operation_id, action=action)
+
+    async def _rollback_sql(self, sku_id: str, operation_id: str, *, action: str) -> None:
         async with self.database.sessions.begin() as session:
-            operation = await session.get(InventoryOperation, operation_id, with_for_update=True)
-            if operation is None or operation.sku_id != sku_id:
-                raise LookupError("reservation not found")
-            stock = await session.get(Inventory, sku_id, with_for_update=True)
-            if stock is None:
-                raise LookupError("sku not found")
             expected = "confirmed" if action == "confirm" else "released"
-            if operation.state != expected:
+            changed = await session.execute(
+                update(InventoryOperation)
+                .where(InventoryOperation.operation_id == operation_id,
+                       InventoryOperation.sku_id == sku_id,
+                       InventoryOperation.state == expected)
+                .values(state="reserved")
+                .execution_options(synchronize_session=False)
+            )
+            if changed.rowcount == 0:
+                operation = await session.get(InventoryOperation, operation_id)
+                if operation is None or operation.sku_id != sku_id:
+                    raise LookupError("reservation not found")
                 raise RuntimeError("reservation is not in rollback state")
+            # The inventory operation row changed earlier in this transaction;
+            # read its quantity once for the corresponding stock update.
+            operation = await session.get(InventoryOperation, operation_id)
+            if operation is None:
+                raise LookupError("reservation not found")
             if action == "confirm":
-                stock.sold -= operation.quantity
-                stock.reserved += operation.quantity
+                values = {"sold": Inventory.sold - operation.quantity,
+                          "reserved": Inventory.reserved + operation.quantity}
             else:
-                stock.available -= operation.quantity
-                stock.reserved += operation.quantity
-            operation.state = "reserved"
-            stock.version += 1
+                values = {"available": Inventory.available - operation.quantity,
+                          "reserved": Inventory.reserved + operation.quantity}
+            values["version"] = Inventory.version + 1
+            stock_changed = await session.execute(
+                update(Inventory).where(Inventory.sku_id == sku_id).values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            if stock_changed.rowcount == 0:
+                raise LookupError("sku not found")
 
     @staticmethod
     def _text(value) -> str:

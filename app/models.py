@@ -65,6 +65,13 @@ class CampaignAdmission(Base):
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
 
 
+class LegacyKVRecord(Base):
+    """Opaque C++ LocalKV records preserved by the one-way import utility."""
+    __tablename__ = "legacy_kv_records"
+    key: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    value: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
 class AdminAuditLog(Base):
     __tablename__ = "admin_audit_logs"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

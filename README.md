@@ -43,7 +43,7 @@ python run.py
 
 Linux/macOS 使用 `source .venv/bin/activate` 激活虚拟环境。也可只安装运行依赖：`python -m pip install -r requirements.txt`。
 
-默认使用当前目录的 SQLite 文件 `python-commerce.db`、本地库存、本地命令队列和进程内会话/请求状态，并初始化演示用 `sku-1`、`promo-1`。SQLite 使用 WAL journal 和 `synchronous=FULL`；网关按间隔用 SQLite 在线备份 API 写出一致快照，退出时再做一次最终快照。默认快照路径是数据库同目录下的 `python-commerce.snapshot.sqlite`，可用 `ECOMMERCE_STORAGE_SNAPSHOT` 和 `ECOMMERCE_SNAPSHOT_INTERVAL_SECONDS` 修改。它不是 C++ `LVK2` WAL/snapshot 文件，不能互相读取。HTTP 默认监听 `0.0.0.0:8080`。用 `ECOMMERCE_HOST`、`ECOMMERCE_PORT` 修改监听地址。
+默认使用当前目录的 SQLite 文件 `python-commerce.db`、本地库存、本地命令队列和进程内会话/请求状态，并初始化演示用 `sku-1`、`promo-1`。SQLite 使用 WAL journal 和 `synchronous=FULL`；网关按间隔用 SQLite 在线备份 API 写出一致快照，退出时再做一次最终快照。默认快照路径是数据库同目录下的 `python-commerce.snapshot.sqlite`，可用 `ECOMMERCE_STORAGE_SNAPSHOT` 和 `ECOMMERCE_SNAPSHOT_INTERVAL_SECONDS` 修改。Python 运行时不会直接读取 C++ `LVK2/LVS2` 文件；迁移工具可另行只读解析并归档原始记录，格式差异和语义边界见 `MIGRATION_CHECKLIST.md`。HTTP 默认监听 `0.0.0.0:8080`。用 `ECOMMERCE_HOST`、`ECOMMERCE_PORT` 修改监听地址。
 
 `.env.example` 仅包含无真实凭证的示例。应用只读取进程环境变量，不会自行加载 `.env`。Docker Compose 会按 Compose 自身规则读取项目根目录的 `.env`。
 
@@ -63,11 +63,15 @@ $env:ECOMMERCE_FLASH_SALE_QUEUE = "redis"
 python run.py
 ```
 
-也可用 `ECOMMERCE_DATABASE_URL=mysql+asyncmy://...` 和 `ECOMMERCE_REDIS_URL`。设置读取进程环境变量，不加载 `.env`。`ECOMMERCE_MYSQL_HOSTS` 目前只使用第一个地址；SQLAlchemy 的 async MySQL 驱动没有复用 C++ 连接池的主机故障切换策略。
+也可用 `ECOMMERCE_DATABASE_URL=mysql+asyncmy://...` 和 `ECOMMERCE_REDIS_URL`。设置读取进程环境变量，不加载 `.env`。`ECOMMERCE_MYSQL_HOSTS` 是有序启动候选列表；每个候选都要建立完整的 `ECOMMERCE_MYSQL_POOL_SIZE` 个连接并通过 `SELECT 1` 才会被选中。运行期间两版都只在当前选中主机重连，不会自动切换到后续主机。
 
 ### Docker Compose 演示栈
 
 `docker compose up --build` 会启动 MySQL、Redis、API 和独立 worker。Compose 中的密码默认值仅供本机演示；部署前通过环境变量改成自己的凭证。MySQL 初始化脚本只在空数据目录执行；已有数据目录不会被覆盖或自动迁移。
+
+### 外部依赖验证
+
+`python -m tools.external_validation` 会创建唯一的 Compose 项目并启动 MySQL、Redis、Redpanda、API 和 worker；它实际运行 Redis/MySQL 集成用例及队列 smoke，再输出项目名并保留容器、卷供检查。多实例验证用 `python -m tools.multi_instance_failover --start-compose`，RocketMQ 应用 DLQ 中断/重放验证用 `python -m tools.rocketmq_dlq_validation --start-compose`。这些脚本使用 `.env.example` 和本地演示凭证，未读取项目 `.env`；启动后不会执行 `down` 或删除卷。停止时用脚本输出的 Compose 项目名和配置文件执行 `docker compose ... stop`。
 
 ### 依赖服务和适配模式
 
@@ -75,7 +79,7 @@ python run.py
 | --- | --- | --- |
 | SQLite + 本地队列 | 零外部依赖开发；数据库事务保存本地业务状态 | `aiosqlite`、进程内 `asyncio.Queue`；SQLite WAL 与在线快照替代本地 KV/WAL/snapshot API |
 | Redis | 多实例限流、活动准入、请求状态、库存 Lua 脚本、List 命令队列、等待室和 Redis DLQ | `redis.asyncio` 执行与 C++ 相同 key/script 数据契约 |
-| MySQL | 用户/活动/订单/支付/请求状态、库存账本、审计和事务 Outbox | SQLAlchemy asyncio + `asyncmy`；当前 `MYSQL_HOSTS` 只尝试首个主机 |
+| MySQL | 用户/活动/订单/支付/请求状态、库存账本、审计和事务 Outbox | SQLAlchemy asyncio + `asyncmy`；启动时按 `MYSQL_HOSTS` 顺序选择第一个能建立完整固定大小 pool 的主机，运行期间不会切换到后续主机 |
 | Kafka | Outbox 事件、通知 fanout、Kafka DLQ peek/replay | `aiokafka`；没有接成秒杀命令队列 |
 | RocketMQ 5.x | 秒杀命令队列、应用 DLQ、Outbox 发布 | 官方 Python gRPC SDK，通过线程封装其同步接口；消费者串行 ACK |
 
@@ -99,7 +103,7 @@ $env:ECOMMERCE_ROCKETMQ_TLS = "false"
 python run.py
 ```
 
-`ECOMMERCE_ROCKETMQ_ENDPOINT` 是 RocketMQ 5.x Proxy 的 gRPC 端点。未显式设置 DLQ topic 时默认使用命令 topic 加 `.dlq`。`ECOMMERCE_ROCKETMQ_INVISIBLE_MS` 支持 1,000 到 3,600,000 毫秒，非法值按 C++ 行为回到 120,000 毫秒。RocketMQ DLQ 检查只返回合法消息的解析字段；无法解析的消息只展示消息 ID 和 payload 字节数。Kafka broker 若配置，还可用于当前 C++ 实际提供的 Kafka DLQ 运维入口。
+`ECOMMERCE_ROCKETMQ_ENDPOINT` 是 RocketMQ 5.x Proxy 的 gRPC 端点。Compose 宿主机发布端口默认是 `8081`，与 Proxy 返回给 SDK 的路由地址一致；如本机端口冲突，可覆盖 `ECOMMERCE_ROCKETMQ_PUBLISHED_PORT` 并在宿主机上使用 Broker/Proxy 实际可达的路由地址。容器内部固定用 `rocketmq-proxy:8081`。未显式设置 DLQ topic 时默认使用命令 topic 加 `.dlq`。`ECOMMERCE_ROCKETMQ_INVISIBLE_MS` 支持 1,000 到 3,600,000 毫秒，非法值按 C++ 行为回到 120,000 毫秒。RocketMQ DLQ 检查只返回合法消息的解析字段；无法解析的消息只展示消息 ID 和 payload 字节数。Kafka broker 若配置，还可用于当前 C++ 实际提供的 Kafka DLQ 运维入口。
 
 ### Kafka、管理凭证与关键配置
 
@@ -135,8 +139,42 @@ Python 实现与当前 C++ API 路径相对应：
 - 秒杀与订单：`POST /flash-sale/orders`、`GET /flash-sale/requests`、`GET /orders`、`POST /orders/pay`、`POST /orders/cancel`、`POST /payments/callback/mock`
 - 活动：`GET /promotions/promo-1`、`GET /campaigns`、`GET/POST/PATCH /admin/campaigns` 及 `preheat/start/pause/resume/finish` 管理动作
 - 管理：`GET /admin/audit`、`GET /admin/dlq`、`POST /admin/dlq/replay`、`GET /admin/reconcile`、`POST /admin/reconciliation/run`
+- Agent：`POST /agent/ask`（要求 Bearer 登录，只读商品、活动、库存和当前用户订单）
 
 管理端仍按 C++ 的 viewer/operator/admin 角色要求授权。秒杀 API 表单字段、状态码及错误响应以 `app/main.py` 为准。
+
+## 只读电商 Agent
+
+默认 `ECOMMERCE_AGENT_PROVIDER=fake`，无需模型密钥即可离线演示；这是确定性规则 provider，不是真实大语言模型。可选 `openai-compatible` provider 从 `ECOMMERCE_AGENT_API_KEY` 或 `OPENAI_API_KEY` 读取密钥，并可配置 base URL、模型和超时。详见 [`docs/AGENT.md`](docs/AGENT.md)。
+
+```powershell
+$username = "agent-demo-$([Guid]::NewGuid().ToString('N'))"
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/users/register `
+  -ContentType 'application/x-www-form-urlencoded' `
+  -Body @{username=$username; password='Demo-Password-1'} | Out-Null
+$login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/users/login `
+  -ContentType 'application/x-www-form-urlencoded' `
+  -Body @{username=$username; password='Demo-Password-1'}
+$headers = @{Authorization="Bearer $($login.token)"; 'X-Request-Id'='agent-demo-1'}
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/agent/ask `
+  -Headers $headers -ContentType 'application/json' `
+  -Body '{"message":"查询商品 sku-1 的价格"}'
+```
+
+Agent 只能调用项目服务层公开的五个读取工具。订单读取同时按订单 ID 和服务器鉴权得到的用户 ID 过滤；模型不能传入或替换身份。Agent 没有创建/支付/取消订单、扣库存或修改活动工具，不改既有业务 API。
+
+## 构建、测试和迁移工具
+
+```powershell
+python -m tools.build --check-dependencies
+python -m tools.test
+python -m tools.flash_sale_soak --seconds 30 --workers 16
+python -m tools.import_cpp_local_kv --snapshot .\old.snapshot --wal .\old.wal --dry-run
+```
+
+本地数据恢复工具只读解析 C++ `LVS2/LVK2` 文件，可将恢复的原始字节记录归档到一个新的 SQLite 数据库；它不会改源文件，也不把 C++ 旧 tab/pipe 记录自动转换为 Python 业务表。真实服务验证可用 `tools.external_smoke`、`tests/test_redis_integration.py` 和 `tests/test_mysql_integration.py`。MySQL 写入容量工具 `python -m tools.mysql_capacity --requests 1000 --concurrency 8` 会创建本轮唯一 SKU、订单和 Outbox 记录，只能对隔离测试 schema 运行。Python 基准只报告当前 Python 环境，不与 C++ 性能结果比较。
+
+项目没有配置 Ruff、mypy 或其他 lint/type-check 工具；当前代码检查使用 `compileall` 和 pytest。未运行的依赖集成、外部模型和压测都会在 [`MIGRATION_CHECKLIST.md`](MIGRATION_CHECKLIST.md) 中保持“未验证”。
 
 ## C++ 到 Python 模块映射
 
@@ -149,7 +187,7 @@ Python 实现与当前 C++ API 路径相对应：
 | `src/messaging/order_message.*`、`flash_sale_order_consumer.*` | `app/messages.py`、`app/workers/service.py` | `FOQ1` 网络字节格式兼容；消费重试、库存不足、状态推进、DLQ 和未落库预留补偿沿用原顺序。 |
 | `src/kv/redis_order_queue.*`、`rocketmq_order_queue.*`、本地队列 | `app/adapters/queue.py`、`rocketmq_queue.py` | 保留 Redis List/容量与 DLQ；RocketMQ 以官方 Python gRPC SDK 替代 C++ SDK，等待发送 ACK、消费可见性租约和处理成功后 ACK；本地队列保持进程内语义。 |
 | `src/business/inventory/*`、`src/kv/redis_inventory_gateway.*` | `app/adapters/inventory.py` | Redis Lua 原子预留、确认、释放、回滚及库存操作 ID 保持；本地模式由 SQL 事务与库存操作台账替代本地 KV API，SQLite WAL 提供提交恢复，本地快照使用 SQLite 在线备份。 |
-| `src/storage/local_engine/*`、`src/storage/wal/*`、`src/storage/snapshot/*` | `app/database.py`、`app/storage/local_snapshot.py` | SQLite WAL + FULL synchronous、事务写入和定时一致备份对应本地持久化/快照职责；存储文件格式不同，不支持 C++ 快照/WAL 导入。 |
+| `src/storage/local_engine/*`、`src/storage/wal/*`、`src/storage/snapshot/*` | `app/database.py`、`app/storage/local_snapshot.py`、`app/storage/cpp_local_kv.py`、`tools/import_cpp_local_kv.py` | 在线 Python 存储采用 SQLite；迁移工具按原格式只读解析 `LVS2/LVK2` 并归档恢复后的 key/value 字节，不在原文件上恢复或截断，也不推断旧业务值的语义。 |
 | `src/kv/redis_flash_sale_gate.*`、限流和等待室适配器 | `app/adapters/admission.py` | 沿用 Redis gate key、脚本、token bucket、等待室 FIFO/租约数据形状；本地使用 async 锁和 SQL 表。 |
 | `src/business/order/*`、`src/storage/mysql/mysql_transaction_store.*` | `app/services/commerce.py`、`app/models.py` | SQLAlchemy async 事务和条件状态更新替代手写 MySQL SQL；保留唯一键、订单终态、支付事务、超时租约和 Outbox 约束。 |
 | `src/business/flash_sale/flash_sale_request_status_store.*` | `app/services/request_status.py` | Redis 状态编码、状态名、24 小时 TTL、入口与 worker 写入层、条件更新和 MySQL 持久状态读取。 |
@@ -162,8 +200,8 @@ Python 实现与当前 C++ API 路径相对应：
 
 ## 尚有差异的底层能力
 
-- C++ 的本地 KV/WAL/snapshot 引擎由 SQLite/SQLAlchemy WAL、事务和在线备份替代。不是同一 WAL 格式，也不能读取 C++ 的本地快照文件。本地事件 broker 的发布、订阅、投递重试、DLQ 和待处理计数接口有实现；主程序没有为该 broker 注册本地消费者，因此当前本地模式只保留事件，不执行 Kafka 通知 fanout。
-- Python `ECOMMERCE_MYSQL_HOSTS` 只尝试第一个地址，没有迁移 C++ 连接池的主机故障切换。
+- C++ 的本地 KV/WAL/snapshot 在线存储由 SQLite/SQLAlchemy WAL、事务和在线备份替代；两种在线格式不兼容。单独的只读迁移工具兼容解析 C++ `LVS2/LVK2`，原始 key/value 导入后仍需业务方确认是否迁移成活动业务表。本地事件 broker 的发布、订阅、投递重试、DLQ 和待处理计数接口有实现；主程序没有为该 broker 注册本地消费者，因此当前本地模式只保留事件，不执行 Kafka 通知 fanout。
+- MySQL 启动时故障切换已按 C++ 连接池规则实现：每个候选都须建立完整固定大小连接池并全部通过 `SELECT 1`；当前候选运行期间失效时，两版都只重连当前主机，不旋转到后续候选。
 - C++ Reactor 的活动连接数和 HTTP worker 队列深度由 Uvicorn 接管；Python debug 接口能报告请求计数和活跃 ASGI 请求，但 worker 队列深度返回 `null`。
 - 当前 C++ 主程序只接受 `local`、`redis`、`rocketmq` 三种秒杀命令队列。尽管源码中有 Kafka queue/consumer 类，主程序未把它们接入秒杀命令链路，因此 Python 也没有增加 Kafka 秒杀命令队列模式。Kafka 仍用于源码实际接入的事件、通知和 DLQ 管理。
 - Python 性能受 Python runtime、ASGI、SQLAlchemy 和所选驱动影响；C++ 性能数字不适用于 Python 版本。

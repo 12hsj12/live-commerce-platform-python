@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
 
@@ -169,12 +171,12 @@ async def count_http(request: Request, call_next):
     started = time.perf_counter()
     runtime = getattr(request.app.state, "runtime", None)
     if runtime is not None:
-        runtime.metrics["http_active_connections"] += 1
+        runtime.metrics["http_inflight_requests"] += 1
     try:
         response = await call_next(request)
     finally:
         if runtime is not None:
-            runtime.metrics["http_active_connections"] -= 1
+            runtime.metrics["http_inflight_requests"] -= 1
     if runtime is not None:
         runtime.metrics["http_requests"] += 1
         runtime.metrics[f"http_responses_{response.status_code // 100}xx"] += 1
@@ -458,7 +460,13 @@ async def metrics(request: Request):
         pending = None
     queue_depth_known = runtime.queue_mode != "rocketmq" and pending is not None
     gauges = {
-        "http_active_connections": runtime.metrics["http_active_connections"],
+        # ASGI workers don't expose the C++ TCP connection and request queue internals.
+        # -1 plus *_known=0 means unknown; http_inflight_requests is the app-layer equivalent.
+        "http_active_connections": -1,
+        "http_active_connections_known": 0,
+        "http_worker_queue_depth": -1,
+        "http_worker_queue_depth_known": 0,
+        "http_inflight_requests": runtime.metrics["http_inflight_requests"],
         "flash_sale_queue_depth": pending if queue_depth_known else -1,
         "flash_sale_queue_depth_known": 1 if queue_depth_known else 0,
         "flash_sale_consumer_processed": runtime.metrics["flash_sale_consumer_processed"],
@@ -480,8 +488,11 @@ async def debug_stats(request: Request):
         if asyncio.iscoroutine(pending):
             pending = await pending
     return _json(200, {"http_requests": runtime.metrics["http_requests"],
-        "http_active_connections": runtime.metrics["http_active_connections"],
+        "http_active_connections": None,
+        "http_active_connections_known": False,
+        "http_inflight_requests": runtime.metrics["http_inflight_requests"],
         "http_worker_queue_depth": None,
+        "http_worker_queue_depth_known": False,
         "flash_sale_queue_depth": pending,
         "flash_sale_consumer_processed": runtime.metrics["flash_sale_consumer_processed"],
         "flash_sale_consumer_rejected": runtime.metrics["flash_sale_consumer_rejected"],
@@ -523,6 +534,30 @@ async def get_order(request: Request):
     if order.user_id != current.id:
         return _json(403, {"error": "order belongs to another user"})
     return _json(200, {"order_id": order.id, "state": order.state})
+
+
+@app.post("/agent/ask")
+async def ask_agent(request: Request):
+    current = await _current_user(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return _json(400, {"error": "a JSON object with a message is required"})
+    if not isinstance(body, dict) or not isinstance(body.get("message"), str):
+        return _json(400, {"error": "a JSON object with a message is required"})
+    message = body["message"].strip()
+    if not message or len(message) > 2000:
+        return _json(400, {"error": "message must contain 1 to 2000 characters"})
+    supplied_id = request.headers.get("x-request-id", "")
+    request_id = supplied_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,96}", supplied_id) else uuid.uuid4().hex
+    runtime = _runtime(request)
+    try:
+        result = await runtime.agent.ask(current.id, request_id, message)
+    except TimeoutError:
+        return _json(504, {"request_id": request_id, "error": "assistant timed out"})
+    except Exception:
+        return _json(502, {"request_id": request_id, "error": "assistant provider failed"})
+    return _json(200, {"request_id": request_id, "answer": result.answer, "tool_trace": result.tool_trace})
 
 
 @app.post("/orders/pay")

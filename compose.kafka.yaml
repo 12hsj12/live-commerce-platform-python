@@ -1,0 +1,26 @@
+services:
+  api:
+    environment:
+      ECOMMERCE_KAFKA_BROKERS: redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  worker:
+    environment:
+      ECOMMERCE_KAFKA_BROKERS: redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.2
+    profiles: ["kafka"]
+    command: redpanda start --overprovisioned --smp 1 --memory 1G --reserve-memory 0M --check=false --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 --advertise-kafka-addr internal://redpanda:9092,external://localhost:${ECOMMERCE_REDPANDA_PUBLISHED_PORT:-19092}
+    ports:
+      - "${ECOMMERCE_REDPANDA_PUBLISHED_PORT:-19092}:19092"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

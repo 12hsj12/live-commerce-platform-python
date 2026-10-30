@@ -9,6 +9,8 @@ services:
     volumes:
       - mysql-data:/var/lib/mysql
       - ./deploy/mysql/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    ports:
+      - "${ECOMMERCE_MYSQL_PUBLISHED_PORT:-13316}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
@@ -22,6 +24,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    ports:
+      - "${ECOMMERCE_REDIS_PUBLISHED_PORT:-16379}:6379"
 
   api:
     build: .
@@ -32,13 +36,17 @@ services:
       ECOMMERCE_MYSQL_USER: ecommerce
       ECOMMERCE_MYSQL_PASSWORD: ${ECOMMERCE_MYSQL_PASSWORD:-local-app-password-change-me}
       ECOMMERCE_MYSQL_DATABASE: ecommerce
+      ECOMMERCE_MYSQL_POOL_SIZE: ${ECOMMERCE_MYSQL_POOL_SIZE:-4}
       ECOMMERCE_REDIS_URL: redis://redis:6379/0
       ECOMMERCE_INVENTORY_MODE: redis
       ECOMMERCE_FLASH_SALE_QUEUE: redis
       ECOMMERCE_HOST: 0.0.0.0
       ECOMMERCE_PORT: 8080
+      ECOMMERCE_DEMO_STOCK: ${ECOMMERCE_DEMO_STOCK:-100}
+      ECOMMERCE_DEMO_CAMPAIGN_LIMIT: ${ECOMMERCE_DEMO_CAMPAIGN_LIMIT:-100}
+      ECOMMERCE_ADMIN_TOKEN: ${ECOMMERCE_ADMIN_TOKEN:-local-demo-admin-token}
     ports:
-      - "8080:8080"
+      - "${ECOMMERCE_GATEWAY_PUBLISHED_PORT:-8080}:8080"
     depends_on:
       mysql:
         condition: service_healthy

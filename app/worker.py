@@ -30,6 +30,10 @@ async def main() -> None:
                      for i in range(runtime.settings.waiting_workers))
     if runtime.kafka_producer is not None:
         tasks.append(asyncio.create_task(notification_loop(runtime), name="notification-fanout"))
+    # Compose's `--wait` does not know when the background consumers have
+    # connected to their queue.  This marker lets migration/soak tools inject
+    # dependency failures only after worker initialization has completed.
+    print(f"worker_ready queue_mode={runtime.queue_mode}", flush=True)
     try:
         await stopping.wait()
     finally:

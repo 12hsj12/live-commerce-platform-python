@@ -1,0 +1,119 @@
+services:
+  api:
+    environment:
+      ECOMMERCE_FLASH_SALE_QUEUE: rocketmq
+      ECOMMERCE_ROCKETMQ_ENDPOINT: rocketmq-proxy:8081
+      ECOMMERCE_ROCKETMQ_COMMAND_TOPIC: flashsale.command
+      ECOMMERCE_ROCKETMQ_DLQ_TOPIC: flashsale.dlq
+      ECOMMERCE_ROCKETMQ_CONSUMER_GROUP: flashsale-command-consumers
+      ECOMMERCE_ROCKETMQ_TLS: "false"
+      ECOMMERCE_KAFKA_BROKERS: ""
+    depends_on:
+      rocketmq-proxy:
+        condition: service_healthy
+
+  worker:
+    environment:
+      ECOMMERCE_FLASH_SALE_QUEUE: rocketmq
+      ECOMMERCE_ROCKETMQ_ENDPOINT: rocketmq-proxy:8081
+      ECOMMERCE_ROCKETMQ_COMMAND_TOPIC: flashsale.command
+      ECOMMERCE_ROCKETMQ_DLQ_TOPIC: flashsale.dlq
+      ECOMMERCE_ROCKETMQ_CONSUMER_GROUP: flashsale-command-consumers
+      ECOMMERCE_ROCKETMQ_TLS: "false"
+      ECOMMERCE_KAFKA_BROKERS: ""
+    depends_on:
+      rocketmq-proxy:
+        condition: service_healthy
+
+  rocketmq-init:
+    image: apache/rocketmq:5.3.2
+    profiles: ["rocketmq"]
+    user: "0:0"
+    command: sh -c "chown -R 3000:3000 /init/namesrv-logs /init/broker-logs /init/broker-store /init/proxy-logs"
+    volumes:
+      - rocketmq-namesrv-logs:/init/namesrv-logs
+      - rocketmq-broker-logs:/init/broker-logs
+      - rocketmq-broker-store:/init/broker-store
+      - rocketmq-proxy-logs:/init/proxy-logs
+
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.2
+    profiles: ["rocketmq"]
+    depends_on:
+      rocketmq-init:
+        condition: service_completed_successfully
+    command: sh mqnamesrv
+    ports:
+      - "${ECOMMERCE_ROCKETMQ_NAMESRV_PUBLISHED_PORT:-19876}:9876"
+    volumes:
+      - rocketmq-namesrv-logs:/home/rocketmq/logs
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.2
+    profiles: ["rocketmq"]
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_started
+      rocketmq-init:
+        condition: service_completed_successfully
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    command: sh mqbroker -c /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    ports:
+      - "${ECOMMERCE_ROCKETMQ_BROKER_PUBLISHED_PORT:-11911}:10911"
+    healthcheck:
+      test: ["CMD-SHELL", "sh mqadmin clusterList -n rocketmq-namesrv:9876 | grep -q broker-a"]
+      interval: 10s
+      timeout: 20s
+      retries: 20
+      start_period: 15s
+    volumes:
+      - rocketmq-broker-logs:/home/rocketmq/logs
+      - rocketmq-broker-store:/home/rocketmq/store
+
+  rocketmq-topic-init:
+    image: apache/rocketmq:5.3.2
+    profiles: ["rocketmq"]
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    command:
+      - sh
+      - -c
+      - >-
+        sh mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t flashsale_command
+        && sh mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t flashsale_dlq
+        && sh mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t order_events
+        && sh mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t inventory_events
+        && sh mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t notification_events
+        && sh mqadmin updateTopic -n rocketmq-namesrv:9876 -c DefaultCluster -t flashsale_smoke_test
+    restart: "no"
+
+  rocketmq-proxy:
+    image: apache/rocketmq:5.3.2
+    profiles: ["rocketmq"]
+    depends_on:
+      rocketmq-topic-init:
+        condition: service_completed_successfully
+      rocketmq-namesrv:
+        condition: service_started
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    command: sh mqproxy -pc /home/rocketmq/rocketmq-5.3.2/conf/rmq-proxy.json
+    ports:
+      - "${ECOMMERCE_ROCKETMQ_HTTP_PUBLISHED_PORT:-18083}:8080"
+      - "${ECOMMERCE_ROCKETMQ_PUBLISHED_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8081'"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  rocketmq-namesrv-logs:
+  rocketmq-broker-logs:
+  rocketmq-broker-store:
+  rocketmq-proxy-logs:

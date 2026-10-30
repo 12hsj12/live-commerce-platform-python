@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Optional
+from sqlalchemy.engine import make_url
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -37,6 +38,15 @@ class Settings:
     port: int = 8080
     process_role: str = "all"
     database_url: str = "sqlite+aiosqlite:///./python-commerce.db"
+    mysql_hosts: tuple[str, ...] = ()
+    mysql_port: int = 3306
+    mysql_pool_size: int = 4
+    agent_provider: str = "fake"
+    agent_model: str = "gpt-4o-mini"
+    agent_api_key: Optional[str] = None
+    agent_base_url: str = "https://api.openai.com/v1"
+    agent_timeout_seconds: int = 15
+    agent_max_tool_rounds: int = 4
     storage_snapshot_path: Optional[str] = None
     snapshot_interval_seconds: int = 30
     redis_url: Optional[str] = None
@@ -82,9 +92,20 @@ class Settings:
         mysql_mode = bool(mysql_host or mysql_hosts)
         if database_url:
             mysql_mode = database_url.startswith("mysql+")
+        configured_hosts = tuple(dict.fromkeys(
+            host.strip() for host in (mysql_hosts or mysql_host or "").split(",") if host.strip()
+        ))
+        port = _positive_int("ECOMMERCE_MYSQL_PORT", 3306)
+        pool_size = _positive_int("ECOMMERCE_MYSQL_POOL_SIZE", 4)
+        if mysql_mode and database_url:
+            url = make_url(database_url)
+            port = _positive_int("ECOMMERCE_MYSQL_PORT", url.port or 3306)
+            if not configured_hosts and url.host:
+                configured_hosts = (url.host,)
+            if configured_hosts:
+                database_url = url.set(host=configured_hosts[0], port=port).render_as_string(hide_password=False)
         elif mysql_mode:
-            host = (mysql_hosts or mysql_host or "").split(",", 1)[0].strip()
-            port = _positive_int("ECOMMERCE_MYSQL_PORT", 3306)
+            host = configured_hosts[0]
             user = os.getenv("ECOMMERCE_MYSQL_USER", "ecommerce")
             password = os.getenv("ECOMMERCE_MYSQL_PASSWORD", "ecommerce")
             database = os.getenv("ECOMMERCE_MYSQL_DATABASE", "ecommerce")
@@ -95,6 +116,11 @@ class Settings:
                 f"{quote_plus(database)}?charset=utf8mb4"
             )
         else:
+            configured_hosts = ()
+            pool_size = 4
+            port = 3306
+
+        if not database_url:
             database_url = "sqlite+aiosqlite:///./python-commerce.db"
 
         redis_host = os.getenv("ECOMMERCE_REDIS_HOST")
@@ -109,6 +135,15 @@ class Settings:
             port=_positive_int("ECOMMERCE_PORT", 8080),
             process_role=os.getenv("ECOMMERCE_PROCESS_ROLE", "all"),
             database_url=database_url,
+            mysql_hosts=configured_hosts,
+            mysql_port=port,
+            mysql_pool_size=pool_size,
+            agent_provider=os.getenv("ECOMMERCE_AGENT_PROVIDER", "fake").strip().lower(),
+            agent_model=os.getenv("ECOMMERCE_AGENT_MODEL", "gpt-4o-mini"),
+            agent_api_key=os.getenv("ECOMMERCE_AGENT_API_KEY") or os.getenv("OPENAI_API_KEY") or None,
+            agent_base_url=os.getenv("ECOMMERCE_AGENT_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+            agent_timeout_seconds=_positive_int("ECOMMERCE_AGENT_TIMEOUT_SECONDS", 15),
+            agent_max_tool_rounds=_positive_int("ECOMMERCE_AGENT_MAX_TOOL_ROUNDS", 4),
             storage_snapshot_path=os.getenv("ECOMMERCE_STORAGE_SNAPSHOT") or None,
             snapshot_interval_seconds=_positive_int("ECOMMERCE_SNAPSHOT_INTERVAL_SECONDS", 30),
             redis_url=redis_url,

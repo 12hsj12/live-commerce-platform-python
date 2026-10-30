@@ -41,6 +41,7 @@ class Runtime:
         self.flash_sale: FlashSaleService | None = None
         self.orders: OrderService | None = None
         self.products: ProductService | None = None
+        self.agent = None
         self.product_cache = AsyncShardedCache(16, 1024)
         self.global_limiter: LocalTokenBucket | None = None
         self.metrics: Counter[str] = Counter()
@@ -125,6 +126,18 @@ class Runtime:
                                            self.ingress_statuses, self.promotions)
         self.orders = OrderService(self.database, self.inventory, self.statuses)
         self.products = ProductService(self.database, self.redis, self.product_cache)
+        from .agent.service import AgentService
+        from .agent.providers import build_provider
+
+        self.agent = AgentService(
+            provider=build_provider(self.settings),
+            products=self.products,
+            promotions=self.promotions,
+            inventory=self.inventory,
+            orders=self.orders,
+            timeout_seconds=self.settings.agent_timeout_seconds,
+            max_tool_rounds=self.settings.agent_max_tool_rounds,
+        )
         self.global_limiter = LocalTokenBucket(self.settings.global_rate, self.settings.global_burst)
 
         if self.settings.kafka_brokers:
