@@ -76,6 +76,7 @@ CREATE TABLE outbox_events (
     topic VARCHAR(128) NOT NULL,
     event_key VARCHAR(128) NOT NULL,
     payload BLOB NOT NULL,
+    sequence BIGINT NOT NULL DEFAULT 0,
     published BOOLEAN NOT NULL DEFAULT FALSE,
     attempts INT NOT NULL DEFAULT 0,
     claimed_by VARCHAR(128) NULL,

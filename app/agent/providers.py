@@ -17,6 +17,7 @@ class ToolCall:
 class Completion:
     content: str | None
     tool_calls: tuple[ToolCall, ...] = ()
+    reasoning_content: str | None = None
 
 
 class ProviderError(RuntimeError):
@@ -67,18 +68,24 @@ class FakeProvider:
 class OpenAICompatibleProvider:
     """OpenAI Chat Completions compatible provider; key is kept in process memory only."""
 
-    def __init__(self, base_url: str, model: str, api_key: str, timeout_seconds: int):
+    def __init__(self, base_url: str, model: str, api_key: str, timeout_seconds: int,
+                 thinking_mode: str | None = None):
         if not api_key:
             raise ValueError("ECOMMERCE_AGENT_API_KEY is required for the configured provider")
+        if thinking_mode not in {None, "enabled", "disabled"}:
+            raise ValueError("ECOMMERCE_AGENT_THINKING must be enabled or disabled")
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.thinking_mode = thinking_mode
 
     async def complete(self, messages: list[dict], tools: list[dict]) -> Completion:
         import httpx
 
         payload = {"model": self.model, "messages": messages, "tools": tools, "tool_choice": "auto"}
+        if self.thinking_mode is not None:
+            payload["thinking"] = {"type": self.thinking_mode}
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(
@@ -97,7 +104,12 @@ class OpenAICompatibleProvider:
                     raise ValueError("tool arguments must be a JSON object")
                 calls.append(ToolCall(str(call.get("id", "")), function["name"], arguments))
             content = choice.get("content")
-            return Completion(content if isinstance(content, str) else None, tuple(calls))
+            reasoning_content = choice.get("reasoning_content")
+            return Completion(
+                content if isinstance(content, str) else None,
+                tuple(calls),
+                reasoning_content if isinstance(reasoning_content, str) else None,
+            )
         except Exception as exc:
             # Never include request headers, provider response bodies, or prompts in errors/logs.
             raise ProviderError(type(exc).__name__) from None
@@ -108,5 +120,6 @@ def build_provider(settings) -> ModelProvider:
         return FakeProvider()
     if settings.agent_provider in {"openai", "openai-compatible"}:
         return OpenAICompatibleProvider(settings.agent_base_url, settings.agent_model,
-                                        settings.agent_api_key or "", settings.agent_timeout_seconds)
+                                        settings.agent_api_key or "", settings.agent_timeout_seconds,
+                                        settings.agent_thinking)
     raise ValueError("ECOMMERCE_AGENT_PROVIDER must be fake or openai-compatible")

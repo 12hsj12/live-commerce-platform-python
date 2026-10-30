@@ -16,6 +16,7 @@ dependencies = [
   "asyncmy>=0.2,<1",
   "cryptography>=41,<47",
   "httpx>=0.27,<1",
+  "python-dotenv>=1.0,<2",
   "redis>=5,<7",
   "aiokafka>=0.11,<1",
   "rocketmq-python-client>=5.1.2,<6",

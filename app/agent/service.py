@@ -92,10 +92,13 @@ class AgentService:
                 return AgentResult("本次查询超过工具调用上限，请拆分问题后重试。", trace)
             call_ids = {id(call): call.id or f"agent-{_round}-{index}"
                         for index, call in enumerate(response.tool_calls)}
-            messages.append({"role": "assistant", "content": response.content,
+            assistant_message = {"role": "assistant", "content": response.content,
                 "tool_calls": [{"id": call_ids[id(call)], "type": "function", "function": {
                     "name": call.name, "arguments": json.dumps(call.arguments, ensure_ascii=False)}}
-                    for call in response.tool_calls]})
+                    for call in response.tool_calls]}
+            if response.reasoning_content is not None:
+                assistant_message["reasoning_content"] = response.reasoning_content
+            messages.append(assistant_message)
             for call in response.tool_calls:
                 started = time.perf_counter()
                 error_type = ""

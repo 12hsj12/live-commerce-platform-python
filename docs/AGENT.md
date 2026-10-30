@@ -18,20 +18,21 @@ Agent 没有下单、库存预留、支付、取消订单或活动修改工具�
 
 ## Provider 配置
 
-默认 `ECOMMERCE_AGENT_PROVIDER=fake`，用于离线演示和测试。它根据少量中文关键词调用同一组查询服务，不是 LLM，不会访问外部网络。
+默认 provider 为 Fake，用于离线演示和测试。它根据少量中文关键词调用同一组查询服务，不是 LLM，不会访问外部网络。首次克隆后复制 `.env.example` 为 `.env`，然后按下方说明切换 DeepSeek provider 并填写 API Key。
 
-可选配置 `ECOMMERCE_AGENT_PROVIDER=openai-compatible`，并通过进程环境变量提供：
+DeepSeek 的 `.env` 配置如下：
 
 ```text
 ECOMMERCE_AGENT_PROVIDER=openai-compatible
-ECOMMERCE_AGENT_BASE_URL=https://api.openai.com/v1
-ECOMMERCE_AGENT_MODEL=gpt-4o-mini
-ECOMMERCE_AGENT_API_KEY=<secret-from-secret-manager>
+ECOMMERCE_AGENT_BASE_URL=https://api.deepseek.com
+ECOMMERCE_AGENT_MODEL=deepseek-flash
+ECOMMERCE_AGENT_API_KEY=<your-deepseek-api-key>
+ECOMMERCE_AGENT_THINKING=disabled
 ECOMMERCE_AGENT_TIMEOUT_SECONDS=15
 ECOMMERCE_AGENT_MAX_TOOL_ROUNDS=4
 ```
 
-密钥也可从标准 `OPENAI_API_KEY` 环境变量读取。密钥不应写进仓库、命令历史或客户端请求。OpenAI 兼容 provider 会将 key 只放在服务进程的授权请求头中；HTTP 响应体、提示、headers 和 key 不进入日志。外部模型 provider 未配置真实凭据时未验证。
+本地启动会通过 `python-dotenv` 读取项目根目录 `.env`，且现有进程环境变量优先级更高。Docker Compose 会把 Agent 配置传给 API 容器。DeepSeek 的工具调用可以关闭思考模式以减少多轮协议差异；如启用思考模式，适配器会保留并回传 `reasoning_content`。密钥也可从标准 `OPENAI_API_KEY` 环境变量读取。密钥不应写进仓库、命令历史或客户端请求。OpenAI 兼容 provider 只把 Key 放在授权请求头中，不记录 Key、请求头、提示或供应商响应体。真实模型调用需要你填入有效 Key 后才能验证。
 
 最大工具轮数在服务端硬限制为 8；每轮最多接收 4 个调用，整个请求最多执行 8 个调用；同名同参工具调用只执行一次。单次用户输入限制为 1 到 2000 个字符，模型请求与工具处理共享服务端总超时预算。`X-Request-Id` 仅接受有限字符集和 96 字符长度，否则服务端生成随机 ID。
 

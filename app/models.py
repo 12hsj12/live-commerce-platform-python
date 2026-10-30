@@ -17,6 +17,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="customer")
     password_hash: Mapped[bytes] = mapped_column(LargeBinary(255), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class Product(Base):
@@ -66,10 +67,12 @@ class CampaignAdmission(Base):
 
 
 class LegacyKVRecord(Base):
-    """Opaque C++ LocalKV records preserved by the one-way import utility."""
+    """Unmapped C++ LocalKV bytes preserved with a redacted classification."""
     __tablename__ = "legacy_kv_records"
     key: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
     value: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="local_kv")
+    reason: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown_keyspace")
 
 
 class AdminAuditLog(Base):
@@ -111,6 +114,7 @@ class OutboxEvent(Base):
     topic: Mapped[str] = mapped_column(String(128), nullable=False)
     event_key: Mapped[str] = mapped_column(String(128), nullable=False)
     payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -139,6 +143,14 @@ class FlashSaleRequest(Base):
     state: Mapped[str] = mapped_column(String(32), nullable=False)
     message: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class CppMigrationBatch(Base):
+    """Idempotency marker and aggregate-only report for a C++ data import."""
+    __tablename__ = "cpp_migration_batches"
+    source_fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 Index("idx_campaigns_state_updated", Campaign.state, Campaign.updated_at)

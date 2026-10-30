@@ -10,6 +10,13 @@ python-commerce.db-shm
 python-commerce.db-wal
 python-commerce.snapshot.sqlite
 *.snapshot.sqlite
+*.db
+*.sqlite
+*.sqlite3
+*.wal
+*.snapshot
+*.outbox
+cpp-migration-report*.json
 .pytest_cache/
 .coverage
 htmlcov/

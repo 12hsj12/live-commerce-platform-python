@@ -3,7 +3,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Optional
+from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
+
+
+# Load the project-local .env for local runs. Variables already supplied by the
+# process (for example Docker Compose or a secret manager) take precedence.
+load_dotenv(override=False)
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -45,6 +51,7 @@ class Settings:
     agent_model: str = "gpt-4o-mini"
     agent_api_key: Optional[str] = None
     agent_base_url: str = "https://api.openai.com/v1"
+    agent_thinking: Optional[str] = None
     agent_timeout_seconds: int = 15
     agent_max_tool_rounds: int = 4
     storage_snapshot_path: Optional[str] = None
@@ -142,6 +149,7 @@ class Settings:
             agent_model=os.getenv("ECOMMERCE_AGENT_MODEL", "gpt-4o-mini"),
             agent_api_key=os.getenv("ECOMMERCE_AGENT_API_KEY") or os.getenv("OPENAI_API_KEY") or None,
             agent_base_url=os.getenv("ECOMMERCE_AGENT_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+            agent_thinking=os.getenv("ECOMMERCE_AGENT_THINKING") or None,
             agent_timeout_seconds=_positive_int("ECOMMERCE_AGENT_TIMEOUT_SECONDS", 15),
             agent_max_tool_rounds=_positive_int("ECOMMERCE_AGENT_MAX_TOOL_ROUNDS", 4),
             storage_snapshot_path=os.getenv("ECOMMERCE_STORAGE_SNAPSHOT") or None,

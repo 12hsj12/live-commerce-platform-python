@@ -24,7 +24,7 @@
 | Kafka Outbox、通知 fanout、DLQ peek/replay | `app/adapters/kafka_dlq.py`、`notification_loop` | 已迁移当前主程序实际使用的事件发布、消费和 DLQ 运维，使用 `aiokafka` 替代 librdkafka；真实 Kafka producer/consumer round-trip 已运行。MySQL Outbox 到 Kafka 的端到端发布、通知业务消费及 Kafka DLQ 管理操作仍未在真实 broker 上分别验证；应用层 publisher-ACK 顺序有 fake broker 测试。 |
 | Kafka 秒杀命令队列类 | C++ `KafkaOrderQueue`、`KafkaFlashSaleOrderConsumer` | 未迁移为可配置的 Python 秒杀队列：虽然 C++ 源码包含这些类和测试目标，但当前 `ecommerce_api_main.cc` 只接受 `local/redis/rocketmq`，没有将 Kafka 命令队列接入服务主流程。Kafka 仍迁移用于 Outbox/通知/DLQ。 |
 | MySQL/Redis 库存对账与修复 | `/admin/reconcile`、`/admin/reconciliation/run` | 已迁移当前有 MySQL 且使用 Redis 快库存时的核对、受保护修复和审计路径；在真实 MySQL+Redis 栈执行 `sku-1` 对账，1 项检查、0 mismatch、0 repair。真实不一致修复与审计写入未注入验证。 |
-| 本地 KV、WAL、snapshot | `app/storage/cpp_local_kv.py`、`tools/import_cpp_local_kv.py`、`app/storage/local_snapshot.py` | 已新增 `LVS2/LVK2` little-endian + CRC32 恢复和只读迁移归档，单元测试覆盖快照、SET/DELETE/BATCH、CRC 损坏和不完整尾记录。导入保留原始 key/value 字节到 SQLite `legacy_kv_records`，不将旧业务值自动映射为活跃业务表；C++ 恢复会截断 WAL 尾记录，Python 工具只报告偏移并保持源文件不变。 |
+| 本地 KV、WAL、snapshot 与独立 FileOutbox | `app/storage/cpp_local_kv.py`、`app/storage/cpp_outbox.py`、`app/storage/cpp_business_migration.py`、`tools/import_cpp_business.py` | 已迁移 `LVS2/LVK2` 和 `OBX2` 只读恢复；已知用户、商品、库存/账本和简化订单进入 Python 活跃表，MySQL/Outbox 由同一业务迁移器映射；未知字节仍归档。C++ 打开 WAL 时会 `ftruncate` 不完整尾记录，Python 保持逻辑恢复一致但只报告 torn-tail、不修改源文件。合成测试已覆盖格式和数据转换；没有本机真实数据文件。 |
 | 本地/Redis 商品 cache、singleflight | `app/adapters/cache.py`、`app/services/product.py` | 已迁移 16 分片、每片 1024 容量、LRU、30 秒本地 TTL、按 key singleflight；Redis 键和值格式、24 小时缓存 TTL 保持。 |
 | 日志和 metrics | `app/observability.py`、`Runtime.metrics`、`/metrics`、`/debug/stats` | 保留外部路径、队列/消费者业务指标及 Prometheus 输出。Uvicorn 不暴露 C++ TCP 活跃连接和 worker 队列深度，因此 JSON 返回 null、Prometheus 返回 `-1` 且 `*_known=0`；新增 `http_inflight_requests` 作为定义明确的 ASGI 应用层指标。路由语义由 API 测试验证。 |
 | 配置、演示程序、部署入口 | 环境变量、`.env.example`、`compose.yaml`、`Dockerfile`、`tools/demo_flow.py` | 已提供独立 Python 安装/启动、MySQL schema 和 MySQL+Redis+API+worker Compose 演示。Compose 默认凭证仅为本机占位符。 |
@@ -102,3 +102,23 @@
 | 尚未验证的长时间/灾难路径 | 30 分钟级 soak、进程硬崩溃、RocketMQ broker 重启/租约过期、MySQL 多个候选全不可用、Kafka Outbox 到通知端完整端到端和 Kafka DLQ 重放、Redis DLQ 实机重放、不一致库存修复与审计写入、真实 OpenAI-compatible provider。 |
 
 所有未运行的路径都保持“未验证”，不宣称通过或达到性能指标。
+
+## C++ 业务数据转换迁移（本轮）
+
+逐字段规则和真实存储边界见 [`docs/CPP_DATA_MIGRATION.md`](docs/CPP_DATA_MIGRATION.md)。状态按“源码已确认 / 代码实现 / 合成验证 / 真实来源验证”分别说明。
+
+| C++ 权威来源/字段 | Python 活跃目标 | 转换覆盖与验证 |
+| --- | --- | --- |
+| LocalKV `users/<id>`：角色数字、PBKDF2 hash、enabled | `users` | 已实现并用固定 fixture 验证 Python verifier 接受 C++ PBKDF2-SHA256 格式；不读取、重置或报告真实密码/hash。LocalKV 没有 created_at，以目标默认时间填充，真实用户登录未验证。 |
+| LocalKV `products/<id>`、MySQL `products` | `products` | 已实现；LocalKV 缺 version/updated_at 时分别以 0/DB 默认值补足；双源相同核心字段一致才合并，不一致阻断。合成映射验证通过。 |
+| LocalKV `inventory/stock` + `inventory/reservation`、MySQL `inventory` | `inventory`、`python_inventory_operations` | 已实现；状态映射 Python `reserved/confirmed/released`，并验证 reserved/sold 账本合计。LocalKV 无 version 时设 0。合成守恒和不一致阻断验证通过。 |
+| LocalKV `orders/<id>` | `orders`、`order_items` | 已实现 ID/owner/idempotency/SKU/quantity/state；C++ LocalKV 没存 campaign/time/price，迁移差异及确定性哨兵规则见数据迁移文档。合成目标读回/重复导入/FK验证通过。 |
+| C++ MySQL `campaigns`、`orders`、`order_items`、`payments`、`flash_sale_requests`、`inventory` | 同名 Python ORM 表 | 已实现全列映射；金额保持 cents 整数，活动时间保持 Unix 秒，订单时间/支付/请求状态与租约字段原样保留；唯一键、用户和订单引用/外键在目标检查。合成行映射验证通过，真实 C++ MySQL URL/数据未提供，未做真实迁移。 |
+| C++ MySQL `outbox_events` | `outbox_events` | 已实现 published/attempts/claim/lease/error/payload/time 映射；Python 新增 sequence，MySQL 源无此列时为 0。合成目标读回验证通过；真实 Kafka/RocketMQ 发布未验证。部署 MySQL 更新脚本为 `deploy/mysql/migrations/001_add_outbox_sequence.sql`。 |
+| C++ `OBX2` FileOutbox pending 记录 | `outbox_events` | 已实现 little-endian framing、字段、sequence、CRC 解析；映射 pending、attempts=0；非 UTF-8 event ID/topic/key、无法表示的 sequence 原记录归档，空 event ID 按 C++ 恢复语义保留。CRC/截断/活跃表导入由合成测试验证。 |
+| 未知或不安全解码 LocalKV 记录 | `legacy_kv_records` | 仅未知/无法安全转换的 KV 原字节入档，另记 source/reason；报告只输出聚合原因和数量。合成二进制记录读回验证通过。 |
+| Dry-run / apply / 重复批次 / 导入核验 | `tools/import_cpp_business.py`、`cpp_migration_batches` | 已验证默认 dry-run、显式 apply、来源摘要幂等、冲突/非空目标阻断；导入行、批次标记、字段/外键/库存核验处于同一事务，写入或后置核验注入失败均回滚。 |
+| Redis cache/rate/session/lock/waiting-room/queue/DLQ、Kafka/RocketMQ 未消费消息 | 无本轮输入适配器 | 明确未迁移：当前工具不读取 RDB/AOF、broker log 或在线队列。MySQL/持久 outbox 表按业务权威导入；如待处理命令/DLQ 只存在 Redis/RocketMQ/Kafka，需额外提供安全导出后再迁移。 |
+| 本机真实 C++ snapshot/WAL/DB/Outbox 数据 | 无 | 两仓库未找到 `.snapshot`、`.wal`、`.db`、`.sqlite`、Outbox `.bin`；Windows 默认路径不存在；WSL `/tmp` 存在性检查受系统 `E_ACCESSDENIED` 阻挡，未验证该环境；未连接真实 MySQL，因此没有真实业务数据迁移或核验。 |
+
+验证结果：迁移专项 `23 passed`；完整套件 `31 passed, 2 skipped`。两个跳过用例要求 `ECOMMERCE_MYSQL_TEST_URL` 和 `ECOMMERCE_REDIS_TEST_URL`，本轮未连接这些服务。`compileall` 通过；项目未配置 Ruff/mypy 等 lint/type-check。普通受限 Windows 沙箱会在 Python `asyncio` 创建 socketpair 时停住；相同命令在授权本机执行中完成。测试设置 dotenv guard，避免读取项目 `.env`。真实 C++ 业务数据、外部模型、在线队列和 broker 未被访问。
